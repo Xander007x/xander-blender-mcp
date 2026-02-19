@@ -2771,6 +2771,14 @@ def create_mesh_object(
     # Store initial object count for tracking
     initial_objects = set(bpy.data.objects.keys())
     
+    # Force a full depsgraph evaluation BEFORE creating any new object.
+    # This flushes any pending notifiers / stale subdivision caches left over
+    # from a prior clear_scene or delete_objects call.  Without this, Blender
+    # 5.0 can crash in customData_add_layer__internal (NULL-ptr memcpy) during
+    # the deferred depsgraph refresh that follows object creation.
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    depsgraph.update()
+    
     # Create primitive based on type
     creation_ops = {
         "cube": lambda: bpy.ops.mesh.primitive_cube_add(
@@ -3393,10 +3401,14 @@ def delete_objects(
                     bpy.data.lights.remove(obj_data)
                     data_deleted.append(('light', obj_data_name))
     
-    # Force depsgraph update so the viewport rebuilds draw caches without the
-    # deleted objects.  Prevents GPU subdivision NULL-ptr crash on NVIDIA GPUs.
+    # Thorough depsgraph flush after deletion.  A simple view_layer.update()
+    # is not enough — Blender 5.0 can crash in the deferred depsgraph refresh
+    # (customData_add_layer__internal NULL-ptr) if stale mesh references remain
+    # when new objects are created immediately after deletion.
     if deleted or children_deleted:
         bpy.context.view_layer.update()
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        depsgraph.update()
     
     return {
         "deleted": deleted,
@@ -4886,11 +4898,27 @@ def clear_scene(
             bpy.data.curves.remove(curve)
             removed["curves"] += 1
     
-    # Force depsgraph update so the viewport rebuilds its draw caches with the
-    # removed objects gone.  Without this, the next object creation can crash
-    # in draw_subdiv_topology_info_cb (NULL-ptr memcpy) on NVIDIA GPUs because
-    # the GPU subdivision draw cache still references deleted mesh data.
+    # Clean any remaining orphaned data blocks (lights, cameras, armatures, etc.)
+    # This prevents stale references from causing subdivision crashes later.
+    for attr in ('lights', 'cameras', 'armatures', 'grease_pencils',
+                 'lattices', 'metaballs', 'particles', 'speakers',
+                 'volumes', 'fonts'):
+        collection = getattr(bpy.data, attr, None)
+        if collection is not None:
+            for block in list(collection):
+                if block.users == 0:
+                    collection.remove(block)
+    
+    # Thorough depsgraph flush to prevent crashes when objects are created
+    # immediately after clearing.  Blender 5.0 has a bug where the subdivision
+    # code (both CPU and GPU paths) crashes with a NULL-ptr memcpy if stale
+    # mesh/customdata references remain in the depsgraph when new objects are
+    # added.  A simple view_layer.update() is NOT enough — we must force a
+    # full evaluated depsgraph so that ALL pending notifiers and deferred
+    # evaluations complete before Python returns.
     bpy.context.view_layer.update()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    depsgraph.update()
     
     return {
         "removed": removed,
