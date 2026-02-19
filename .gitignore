@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.blend1
+*.blend2
+.DS_Store
+Thumbs.db
+*.log
+addon/blender_mcp.py
