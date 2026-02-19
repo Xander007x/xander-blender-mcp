@@ -119,8 +119,20 @@ foreach ($pkg in $packages) {
 # ── 4. Install our polymcp_toolkit shim ──────────────────────────
 Write-Host "`n[...] Installing polymcp_toolkit shim..." -ForegroundColor Yellow
 $shimSource = Join-Path $addonDir "polymcp_toolkit.py"
-$shimDest = Join-Path $sitePackages "polymcp_toolkit.py"
 
+# pip installs to user site-packages (no admin needed), so put the shim there too
+$userSitePackages = & $blenderPython -c "import site; print(site.getusersitepackages())" 2>$null
+if (-not $userSitePackages -or -not (Test-Path $userSitePackages)) {
+    # Fallback: find where pip installed fastapi
+    $userSitePackages = & $blenderPython -c "import fastapi, os; print(os.path.dirname(os.path.dirname(fastapi.__file__)))" 2>$null
+}
+if (-not $userSitePackages -or -not (Test-Path $userSitePackages)) {
+    # Last resort: system site-packages (requires admin)
+    $userSitePackages = $sitePackages
+}
+
+New-Item -ItemType Directory -Path $userSitePackages -Force -ErrorAction SilentlyContinue | Out-Null
+$shimDest = Join-Path $userSitePackages "polymcp_toolkit.py"
 Copy-Item -Path $shimSource -Destination $shimDest -Force
 Write-Host "[OK] polymcp_toolkit.py -> $shimDest" -ForegroundColor Green
 

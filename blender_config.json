@@ -1,0 +1,8 @@
+{
+  "blender_path": "C:\\Program Files\\Blender Foundation\\Blender 5.0\\blender.exe",
+  "blender_python": "C:\\Program Files\\Blender Foundation\\Blender 5.0\\5.0\\python\\bin\\python.exe",
+  "port": 8000,
+  "setup_date": "2026-02-19 11:22:17",
+  "addon_installed": true,
+  "blender_version": "5.0"
+}

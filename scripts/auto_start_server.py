@@ -33,5 +33,12 @@ def _try_start_mcp_server():
     return None  # Don't repeat the timer
 
 
-# Register the timer — fires once, 3 seconds after Blender is ready
-bpy.app.timers.register(_try_start_mcp_server, first_interval=3.0)
+def register():
+    """Called by Blender when the startup script is loaded."""
+    bpy.app.timers.register(_try_start_mcp_server, first_interval=3.0)
+
+
+def unregister():
+    """Called by Blender when the startup script is unloaded."""
+    if bpy.app.timers.is_registered(_try_start_mcp_server):
+        bpy.app.timers.unregister(_try_start_mcp_server)
