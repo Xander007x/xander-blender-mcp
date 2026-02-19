@@ -5560,6 +5560,43 @@ def create_blender_mcp_server():
 # Global server instance
 server_thread = None
 server_app = None
+server_start_pending = False
+
+
+def _start_server_deferred():
+    """Start MCP server outside operator event context."""
+    global server_thread, server_app, server_start_pending
+
+    if server_thread is not None and server_thread.is_alive():
+        server_start_pending = False
+        return None
+
+    if not bpy.context.window_manager.windows:
+        return 1.0
+
+    try:
+        thread_executor.start()
+
+        server_app = create_blender_mcp_server()
+
+        def run_server():
+            uvicorn.run(
+                server_app,
+                host=Config.HOST,
+                port=Config.PORT,
+                log_level="info"
+            )
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+
+        server_start_pending = False
+        logger.info(f"MCP Server started successfully on port {Config.PORT} (deferred)")
+        return None
+    except Exception as e:
+        logger.error(f"Deferred MCP server startup failed: {e}")
+        logger.exception(e)
+        return 2.0
 
 class MCPSERVER_PT_main_panel(bpy.types.Panel):
     """Main MCP Server Panel"""
@@ -5614,7 +5651,7 @@ class MCPSERVER_OT_start_server(bpy.types.Operator):
     bl_options = {'REGISTER'}
     
     def execute(self, context):
-        global server_thread, server_app
+        global server_thread, server_start_pending
         
         try:
             if server_thread is not None and server_thread.is_alive():
@@ -5622,37 +5659,19 @@ class MCPSERVER_OT_start_server(bpy.types.Operator):
                 logger.info("Start requested while server already running")
                 return {'FINISHED'}
 
-            # Start thread-safe executor
-            thread_executor.start()
-            
-            # CRASH FIX (iteration 3): Do NOT clear the scene here at all.
-            # Any cleanup (bpy.ops.object.delete OR bpy.data.objects.remove)
-            # in the start_server operator leaves stale internal state that
-            # causes mesh_wrapper_ensure_subdivision to crash when the next
-            # mesh creation triggers a deferred depsgraph refresh.
-            # Scene clearing is the CALLER's responsibility via the
-            # clear_scene MCP tool, which handles orphan purging and
-            # depsgraph flushing correctly.
-            
-            # Create MCP server app
-            server_app = create_blender_mcp_server()
-            
-            # Run in separate thread
-            def run_server():
-                uvicorn.run(
-                    server_app,
-                    host=Config.HOST,
-                    port=Config.PORT,
-                    log_level="info"
-                )
-            
-            server_thread = threading.Thread(target=run_server, daemon=True)
-            server_thread.start()
-            
-            self.report({'INFO'}, f"MCP Server started on http://localhost:{Config.PORT}")
-            logger.info(f"MCP Server started successfully on port {Config.PORT}")
-            
+            if server_start_pending:
+                self.report({'INFO'}, "MCP Server startup already pending")
+                logger.info("Start requested while startup already pending")
+                return {'FINISHED'}
+
+            server_start_pending = True
+            bpy.app.timers.register(_start_server_deferred, first_interval=2.0)
+
+            self.report({'INFO'}, f"MCP Server startup scheduled on http://localhost:{Config.PORT}")
+            logger.info("MCP Server startup scheduled (deferred)")
+            return {'FINISHED'}
         except Exception as e:
+            server_start_pending = False
             self.report({'ERROR'}, f"Failed to start server: {str(e)}")
             logger.error(f"Failed to start server: {e}")
             logger.exception(e)
@@ -5667,7 +5686,12 @@ class MCPSERVER_OT_stop_server(bpy.types.Operator):
     bl_options = {'REGISTER'}
     
     def execute(self, context):
-        global server_thread
+        global server_thread, server_start_pending
+
+        server_start_pending = False
+
+        if bpy.app.timers.is_registered(_start_server_deferred):
+            bpy.app.timers.unregister(_start_server_deferred)
         
         # Stop thread-safe executor
         thread_executor.stop()
