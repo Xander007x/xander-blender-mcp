@@ -5598,6 +5598,37 @@ def _start_server_deferred():
         logger.exception(e)
         return 2.0
 
+
+def schedule_server_start(delay: float = 2.0) -> Dict[str, Any]:
+    """Schedule MCP server startup without using Blender operator context."""
+    global server_start_pending
+
+    if server_thread is not None and server_thread.is_alive():
+        return {
+            "scheduled": False,
+            "already_running": True,
+            "port": Config.PORT,
+            "message": f"MCP Server already running on http://localhost:{Config.PORT}"
+        }
+
+    if server_start_pending:
+        return {
+            "scheduled": False,
+            "already_pending": True,
+            "port": Config.PORT,
+            "message": "MCP Server startup already pending"
+        }
+
+    server_start_pending = True
+    bpy.app.timers.register(_start_server_deferred, first_interval=max(0.1, float(delay)))
+    logger.info(f"MCP Server startup scheduled (programmatic), delay={delay}s")
+    return {
+        "scheduled": True,
+        "port": Config.PORT,
+        "delay": delay,
+        "message": f"MCP Server startup scheduled on http://localhost:{Config.PORT}"
+    }
+
 class MCPSERVER_PT_main_panel(bpy.types.Panel):
     """Main MCP Server Panel"""
     bl_label = "MCP Server Control"
@@ -5654,21 +5685,8 @@ class MCPSERVER_OT_start_server(bpy.types.Operator):
         global server_thread, server_start_pending
         
         try:
-            if server_thread is not None and server_thread.is_alive():
-                self.report({'INFO'}, f"MCP Server already running on http://localhost:{Config.PORT}")
-                logger.info("Start requested while server already running")
-                return {'FINISHED'}
-
-            if server_start_pending:
-                self.report({'INFO'}, "MCP Server startup already pending")
-                logger.info("Start requested while startup already pending")
-                return {'FINISHED'}
-
-            server_start_pending = True
-            bpy.app.timers.register(_start_server_deferred, first_interval=2.0)
-
-            self.report({'INFO'}, f"MCP Server startup scheduled on http://localhost:{Config.PORT}")
-            logger.info("MCP Server startup scheduled (deferred)")
+            start_state = schedule_server_start(delay=2.0)
+            self.report({'INFO'}, start_state.get("message", "MCP Server startup requested"))
             return {'FINISHED'}
         except Exception as e:
             server_start_pending = False
