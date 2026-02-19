@@ -2826,7 +2826,13 @@ def create_mesh_object(
     
     # Execute creation
     creation_ops[primitive_type]()
-    
+
+    # Force scene/depsgraph update before viewport draws the new mesh.
+    # Without this, the GPU subdivision draw cache can crash (null-ptr in
+    # draw_subdiv_topology_info_cb) on NVIDIA GPUs when objects are created
+    # via scripting rather than the GUI.
+    bpy.context.view_layer.update()
+
     # Get the newly created object
     obj = bpy.context.active_object
     if not obj:
@@ -3386,6 +3392,11 @@ def delete_objects(
                 elif hasattr(bpy.data, 'lights') and obj_data in bpy.data.lights.values():
                     bpy.data.lights.remove(obj_data)
                     data_deleted.append(('light', obj_data_name))
+    
+    # Force depsgraph update so the viewport rebuilds draw caches without the
+    # deleted objects.  Prevents GPU subdivision NULL-ptr crash on NVIDIA GPUs.
+    if deleted or children_deleted:
+        bpy.context.view_layer.update()
     
     return {
         "deleted": deleted,
@@ -4875,6 +4886,12 @@ def clear_scene(
             bpy.data.curves.remove(curve)
             removed["curves"] += 1
     
+    # Force depsgraph update so the viewport rebuilds its draw caches with the
+    # removed objects gone.  Without this, the next object creation can crash
+    # in draw_subdiv_topology_info_cb (NULL-ptr memcpy) on NVIDIA GPUs because
+    # the GPU subdivision draw cache still references deleted mesh data.
+    bpy.context.view_layer.update()
+    
     return {
         "removed": removed,
         "preserved": preserved,
@@ -5284,6 +5301,10 @@ def boolean_operation(
     elif hide_b:
         obj_b.hide_set(True)
         obj_b.hide_render = True
+    
+    # Force depsgraph update after modifying/deleting objects to prevent
+    # GPU subdivision draw-cache crash on NVIDIA GPUs.
+    bpy.context.view_layer.update()
     
     # Get final statistics
     stats_after = {
