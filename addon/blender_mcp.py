@@ -174,9 +174,18 @@ class ThreadSafeExecutor:
                 logger.info("Thread-safe executor stopped")
     
     def _process_queue(self):
-        """Process pending operations in the main thread"""
+        """Process ONE pending operation per timer tick in the main thread.
+        
+        CRASH FIX: Previously this drained the entire queue in one tick.
+        That prevented Blender's event loop from running between operations,
+        causing mesh_wrapper_ensure_subdivision to crash when the deferred
+        wm_event_do_refresh_wm_and_depsgraph ran with stale state.
+        
+        Processing one item per tick lets the event loop (including any
+        deferred depsgraph refreshes) complete between MCP operations.
+        """
         try:
-            while not self.execution_queue.empty():
+            if not self.execution_queue.empty():
                 try:
                     request = self.execution_queue.get_nowait()
                     request_id = request['id']
@@ -208,7 +217,7 @@ class ThreadSafeExecutor:
                         logger.error(f"Error executing {func.__name__}: {e}")
                         
                 except queue.Empty:
-                    break
+                    pass
                     
         except Exception as e:
             logger.error(f"Queue processor error: {e}")
@@ -2835,35 +2844,26 @@ def create_mesh_object(
     # Execute creation
     creation_ops[primitive_type]()
 
-    # CRITICAL: Force-convert the mesh to finalize all data and exit the
-    # subdivision wrapper state.  Blender 5.0 wraps newly created meshes in
-    # a subdivision mesh wrapper by default.  When the deferred depsgraph
-    # refresh (wm_event_do_refresh_wm_and_depsgraph) runs later in the C++
-    # event loop, mesh_wrapper_ensure_subdivision is called and crashes in
-    # customData_add_layer__internal with a NULL-ptr memcpy — even with no
-    # subdivision modifier.
-    #
-    # bpy.ops.object.convert(target='MESH') explicitly evaluates the entire
-    # modifier stack and writes final mesh data, removing the wrapper state.
-    # This happens within our Python execution context, before Blender's
-    # deferred refresh can touch the mesh.
-    #
-    # Previous attempts using mesh.update(), calc_loop_triangles(),
-    # view_layer.update(), and evaluated_depsgraph_get().update() did NOT
-    # prevent the crash because they don't clear the wrapper state that the
-    # C++ deferred refresh uses.
-    try:
-        bpy.ops.object.convert(target='MESH')
-    except Exception:
-        pass  # Fallback: let the mesh stay in wrapper mode and hope for the best
-
-    # Also force a full depsgraph evaluation within our context
+    # CRASH FIX (iteration 3): Do NOT call bpy.ops.object.convert(target='MESH')
+    # here.  The convert operator re-tags the mesh for depsgraph evaluation,
+    # and when the timer callback returns, wm_event_do_refresh_wm_and_depsgraph
+    # runs a TBB-threaded depsgraph eval that calls mesh_wrapper_ensure_subdivision
+    # on the re-tagged mesh — crashing in customData_add_layer__internal (NULL
+    # memcpy).  Instead, we strip any SubSurf modifier and force the mesh to
+    # finalize its data in-place without operator-level re-tagging.
+    obj = bpy.context.active_object
+    if obj and obj.type == 'MESH':
+        # Remove any implicit SubSurf modifiers that trigger the wrapper path
+        for mod in list(obj.modifiers):
+            if mod.type == 'SUBSURF':
+                obj.modifiers.remove(mod)
+        # Force mesh data to be fully computed (bypasses wrapper)
+        mesh = obj.data
+        mesh.update()
+        mesh.validate()
+    
+    # Flush view layer — lightweight, doesn't schedule deferred TBB work
     bpy.context.view_layer.update()
-    try:
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-        depsgraph.update()
-    except Exception:
-        pass
 
     # Get the newly created object
     obj = bpy.context.active_object
@@ -5572,25 +5572,14 @@ class MCPSERVER_OT_start_server(bpy.types.Operator):
             # Start thread-safe executor
             thread_executor.start()
             
-            # CRASH FIX: Do NOT use bpy.ops.object.select_all + bpy.ops.object.delete
-            # here. Those raw operators schedule a deferred wm_event_do_refresh_wm_and_depsgraph
-            # that races with the next mesh creation and causes EXCEPTION_ACCESS_VIOLATION
-            # in mesh_wrapper_ensure_subdivision (NULL customdata write).
-            # Instead, use safe bpy.data removal — same approach as clear_scene().
-            # Scene clearing is also the caller's responsibility via the clear_scene tool.
-            for obj in list(bpy.data.objects):
-                bpy.data.objects.remove(obj, do_unlink=True)
-            # Purge orphaned data blocks left behind
-            for mesh in list(bpy.data.meshes):
-                if mesh.users == 0:
-                    bpy.data.meshes.remove(mesh)
-            for mat in list(bpy.data.materials):
-                if mat.users == 0:
-                    bpy.data.materials.remove(mat)
-            # Flush depsgraph so no deferred work remains
-            bpy.context.view_layer.update()
-            depsgraph = bpy.context.evaluated_depsgraph_get()
-            depsgraph.update()
+            # CRASH FIX (iteration 3): Do NOT clear the scene here at all.
+            # Any cleanup (bpy.ops.object.delete OR bpy.data.objects.remove)
+            # in the start_server operator leaves stale internal state that
+            # causes mesh_wrapper_ensure_subdivision to crash when the next
+            # mesh creation triggers a deferred depsgraph refresh.
+            # Scene clearing is the CALLER's responsibility via the
+            # clear_scene MCP tool, which handles orphan purging and
+            # depsgraph flushing correctly.
             
             # Create MCP server app
             server_app = create_blender_mcp_server()
