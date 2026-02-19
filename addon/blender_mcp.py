@@ -51,8 +51,10 @@ class Config:
     PORT = 8000
     QUEUE_TIMEOUT = 30.0
     QUEUE_CHECK_INTERVAL = 0.01
+    QUEUE_WARMUP_INTERVAL = 0.05
     MAX_QUEUE_SIZE = 1000
     THREAD_SAFE_OPERATIONS = True
+    STARTUP_WARMUP_SECONDS = 2.0
     AUTO_INSTALL_PACKAGES = True
     POLYMCP_PATH = r'your_path'
     ENABLE_CACHING = True
@@ -156,11 +158,15 @@ class ThreadSafeExecutor:
         self.result_store = {}
         self.is_running = False
         self.executor = ThreadPoolExecutor(max_workers=1)
+        self.started_at = 0.0
+        self.warmup_done = False
         
     def start(self):
         """Start the queue processor"""
         if not self.is_running:
             if not bpy.app.timers.is_registered(self._process_queue):
+                self.started_at = time.time()
+                self.warmup_done = False
                 bpy.app.timers.register(self._process_queue)
                 self.is_running = True
                 logger.info("Thread-safe executor started")
@@ -184,6 +190,21 @@ class ThreadSafeExecutor:
         Processing one item per tick lets the event loop (including any
         deferred depsgraph refreshes) complete between MCP operations.
         """
+        # Startup warmup barrier: after start_server, let Blender complete
+        # initial notifiers/depsgraph work before handling the first request.
+        if not self.warmup_done:
+            elapsed = time.time() - self.started_at
+            if elapsed < Config.STARTUP_WARMUP_SECONDS:
+                return Config.QUEUE_WARMUP_INTERVAL
+            try:
+                bpy.context.view_layer.update()
+                depsgraph = bpy.context.evaluated_depsgraph_get()
+                depsgraph.update()
+            except Exception as e:
+                logger.warning(f"Warmup depsgraph flush failed: {e}")
+            self.warmup_done = True
+            logger.info("Thread-safe executor warmup complete")
+
         try:
             if not self.execution_queue.empty():
                 try:
