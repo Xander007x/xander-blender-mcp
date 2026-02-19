@@ -54,7 +54,7 @@ class Config:
     QUEUE_WARMUP_INTERVAL = 0.05
     MAX_QUEUE_SIZE = 1000
     THREAD_SAFE_OPERATIONS = True
-    STARTUP_WARMUP_SECONDS = 2.0
+    STARTUP_WARMUP_SECONDS = 8.0
     AUTO_INSTALL_PACKAGES = True
     POLYMCP_PATH = r'your_path'
     ENABLE_CACHING = True
@@ -196,12 +196,6 @@ class ThreadSafeExecutor:
             elapsed = time.time() - self.started_at
             if elapsed < Config.STARTUP_WARMUP_SECONDS:
                 return Config.QUEUE_WARMUP_INTERVAL
-            try:
-                bpy.context.view_layer.update()
-                depsgraph = bpy.context.evaluated_depsgraph_get()
-                depsgraph.update()
-            except Exception as e:
-                logger.warning(f"Warmup depsgraph flush failed: {e}")
             self.warmup_done = True
             logger.info("Thread-safe executor warmup complete")
 
@@ -5623,6 +5617,11 @@ class MCPSERVER_OT_start_server(bpy.types.Operator):
         global server_thread, server_app
         
         try:
+            if server_thread is not None and server_thread.is_alive():
+                self.report({'INFO'}, f"MCP Server already running on http://localhost:{Config.PORT}")
+                logger.info("Start requested while server already running")
+                return {'FINISHED'}
+
             # Start thread-safe executor
             thread_executor.start()
             
