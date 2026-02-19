@@ -9,4 +9,3 @@ build/
 .DS_Store
 Thumbs.db
 *.log
-addon/blender_mcp.py
