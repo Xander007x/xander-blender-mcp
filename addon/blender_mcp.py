@@ -2810,17 +2810,49 @@ def create_mesh_object(
     depsgraph.update()
     
     # Create primitive based on type
+    created_obj = None
+
+    # CRASH FIX (iteration 4): Avoid bpy.ops.mesh.primitive_uv_sphere_add.
+    # Continue triggers this call very early after server start and Blender 5.0
+    # can crash in mesh_wrapper_ensure_subdivision during deferred depsgraph
+    # refresh. Building the mesh with bmesh + bpy.data avoids the operator path.
+    if primitive_type == "sphere":
+        sphere_name = name or "Sphere"
+        mesh = bpy.data.meshes.new(f"{sphere_name}_mesh")
+        bm = bmesh.new()
+        try:
+            try:
+                bmesh.ops.create_uvsphere(
+                    bm,
+                    u_segments=max(3, int(segments)),
+                    v_segments=max(3, int(rings)),
+                    radius=max(0.001, float(size) / 2.0),
+                )
+            except TypeError:
+                # Compatibility for Blender builds that use diameter.
+                bmesh.ops.create_uvsphere(
+                    bm,
+                    u_segments=max(3, int(segments)),
+                    v_segments=max(3, int(rings)),
+                    diameter=max(0.002, float(size)),
+                )
+            bm.to_mesh(mesh)
+        finally:
+            bm.free()
+
+        created_obj = bpy.data.objects.new(sphere_name, mesh)
+        bpy.context.scene.collection.objects.link(created_obj)
+        created_obj.location = location
+        bpy.context.view_layer.objects.active = created_obj
+        created_obj.select_set(True)
+
+    # For other primitives keep existing operator path.
     creation_ops = {
         "cube": lambda: bpy.ops.mesh.primitive_cube_add(
             size=size, 
             location=location
         ),
-        "sphere": lambda: bpy.ops.mesh.primitive_uv_sphere_add(
-            radius=size/2,
-            segments=segments,
-            ring_count=rings,
-            location=location
-        ),
+        "sphere": lambda: None,
         "cylinder": lambda: bpy.ops.mesh.primitive_cylinder_add(
             radius=size/2,
             depth=size,
@@ -2863,7 +2895,8 @@ def create_mesh_object(
     }
     
     # Execute creation
-    creation_ops[primitive_type]()
+    if primitive_type != "sphere":
+        creation_ops[primitive_type]()
 
     # CRASH FIX (iteration 3): Do NOT call bpy.ops.object.convert(target='MESH')
     # here.  The convert operator re-tags the mesh for depsgraph evaluation,
@@ -2872,7 +2905,7 @@ def create_mesh_object(
     # on the re-tagged mesh — crashing in customData_add_layer__internal (NULL
     # memcpy).  Instead, we strip any SubSurf modifier and force the mesh to
     # finalize its data in-place without operator-level re-tagging.
-    obj = bpy.context.active_object
+    obj = created_obj or bpy.context.active_object
     if obj and obj.type == 'MESH':
         # Remove any implicit SubSurf modifiers that trigger the wrapper path
         for mod in list(obj.modifiers):
