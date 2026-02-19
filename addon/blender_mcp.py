@@ -5563,6 +5563,30 @@ server_app = None
 server_start_pending = False
 
 
+def _apply_runtime_safe_settings():
+    """Apply conservative runtime safety settings after Blender is fully idle."""
+    try:
+        prefs = bpy.context.preferences
+        system = getattr(prefs, "system", None)
+
+        if system is not None:
+            if hasattr(system, "use_gpu_subdivision"):
+                system.use_gpu_subdivision = False
+            if hasattr(system, "use_mesh_subdivision"):
+                system.use_mesh_subdivision = False
+            if hasattr(system, "use_subdivision_mesh_wrapper"):
+                system.use_subdivision_mesh_wrapper = False
+
+        for scene in bpy.data.scenes:
+            if hasattr(scene, "cycles"):
+                try:
+                    scene.cycles.device = "CPU"
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"Runtime safe settings failed: {e}")
+
+
 def _start_server_deferred():
     """Start MCP server outside operator event context."""
     global server_thread, server_app, server_start_pending
@@ -5575,6 +5599,7 @@ def _start_server_deferred():
         return 1.0
 
     try:
+        _apply_runtime_safe_settings()
         thread_executor.start()
 
         server_app = create_blender_mcp_server()
