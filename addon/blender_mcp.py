@@ -2835,6 +2835,35 @@ def create_mesh_object(
     # Execute creation
     creation_ops[primitive_type]()
 
+    # CRITICAL: Force the mesh out of subdivision wrapper mode immediately.
+    # Blender 5.0 wraps newly created meshes in a subdivision mesh wrapper by
+    # default.  When the deferred depsgraph refresh (wm_event_do_refresh) runs,
+    # mesh_wrapper_ensure_subdivision → subdiv_mesh_topology_info produces
+    # invalid customData, causing a NULL-ptr memcpy crash in
+    # customData_add_layer__internal.  This happens even with subdivisions=0
+    # (no subdivision modifier).
+    #
+    # By converting the mesh wrapper to final mesh data here, we bypass the
+    # subdivision wrapper entirely, preventing the crash.
+    new_obj = bpy.context.active_object
+    if new_obj and new_obj.type == 'MESH' and new_obj.data:
+        mesh = new_obj.data
+        # If the mesh is in a wrapper state, convert it to regular mesh data
+        if hasattr(mesh, 'wrapper_ensure'):
+            try:
+                mesh.wrapper_ensure()
+            except Exception:
+                pass
+        # Force mesh data to be fully realized (unwrapped)
+        if hasattr(mesh, 'calc_loop_triangles'):
+            mesh.calc_loop_triangles()
+        if hasattr(mesh, 'calc_normals_split'):
+            try:
+                mesh.calc_normals_split()
+            except Exception:
+                pass
+        mesh.update()
+
     # Force scene/depsgraph update before viewport draws the new mesh.
     # Without this, the GPU subdivision draw cache can crash (null-ptr in
     # draw_subdiv_topology_info_cb) on NVIDIA GPUs when objects are created
