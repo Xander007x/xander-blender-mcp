@@ -74,13 +74,51 @@ blender.exe         wm_event_do_refresh_wm_and_depsgraph
 
 ### Root Cause
 
-Both crashes share the same underlying issue: Blender's depsgraph retains stale mesh/customdata references after objects are deleted via `bpy.data.objects.remove()`. When new objects are created immediately afterward (before the deferred depsgraph refresh completes), the subdivision code (both GPU and CPU paths) encounters null pointers in the stale data.
+**The primary crash trigger was the `MCPSERVER_OT_start_server` operator itself.** The operator's `execute()` method called:
+
+```python
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+```
+
+These raw Blender operators schedule a **deferred** `wm_event_do_refresh_wm_and_depsgraph`. Unlike `bpy.data.objects.remove()` (which immediately purges data), `bpy.ops.object.delete()` defers the depsgraph refresh to the next event loop tick. When the MCP server then receives a mesh creation request, the deferred refresh races with the new object creation and the subdivision code encounters stale/null customdata pointers.
+
+This was exacerbated by:
+- A **duplicate class definition** of `MCPSERVER_OT_start_server` (the second silently overwrote the first)
+- The **auto-start timer** (`auto_start_mcp.py`) that calls `bpy.ops.mcp.start_server()` 3 seconds after launch, triggering the unsafe delete path automatically
+
+The `clear_scene()` MCP tool was already safe (using `bpy.data.objects.remove()`), but the operator that starts the server was clearing the scene via the raw crash-prone path.
 
 This does **not** occur when using Blender's GUI (Edit → Delete) because the GUI inserts implicit frame delays between operations, allowing the depsgraph to fully flush.
 
 ---
 
 ## Fixes Applied
+
+### Fix 0: Start Server Operator — THE ACTUAL FIX (`blender_mcp.py`)
+
+The duplicate `MCPSERVER_OT_start_server` class definitions were merged into one, and the unsafe `bpy.ops.object.select_all` + `bpy.ops.object.delete()` were replaced with the safe `bpy.data` API:
+
+```python
+# BEFORE (CRASHED):
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+# AFTER (SAFE):
+for obj in list(bpy.data.objects):
+    bpy.data.objects.remove(obj, do_unlink=True)
+for mesh in list(bpy.data.meshes):
+    if mesh.users == 0:
+        bpy.data.meshes.remove(mesh)
+for mat in list(bpy.data.materials):
+    if mat.users == 0:
+        bpy.data.materials.remove(mat)
+bpy.context.view_layer.update()
+depsgraph = bpy.context.evaluated_depsgraph_get()
+depsgraph.update()
+```
+
+This is the same approach used by the `clear_scene()` tool, which never exhibited the crash.
 
 ### Fix 1: Blender Addon (`blender_mcp.py`)
 

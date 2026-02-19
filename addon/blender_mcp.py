@@ -5569,43 +5569,29 @@ class MCPSERVER_OT_start_server(bpy.types.Operator):
         global server_thread, server_app
         
         try:
-            bpy.ops.object.select_all(action='SELECT')
-            bpy.ops.object.delete()
-            
-            # Avvia il processore di code
-            start_queue_processor()
-            
-            # Create MCP server app
-            server_app = create_blender_mcp_server()
-            
-            # Run in separate thread
-            def run_server():
-                uvicorn.run(server_app, host="0.0.0.0", port=8000)
-            
-            server_thread = threading.Thread(target=run_server, daemon=True)
-            server_thread.start()
-            
-            self.report({'INFO'}, "MCP Server started on http://localhost:8000")
-            
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to start server: {str(e)}")
-            
-        return {'FINISHED'}
-
-class MCPSERVER_OT_start_server(bpy.types.Operator):
-    """Start MCP Server"""
-    bl_idname = "mcp.start_server"
-    bl_label = "Start MCP Server"
-    bl_options = {'REGISTER'}
-    
-    def execute(self, context):
-        global server_thread, server_app
-        
-        try:
             # Start thread-safe executor
             thread_executor.start()
-            bpy.ops.object.select_all(action='SELECT')
-            bpy.ops.object.delete()
+            
+            # CRASH FIX: Do NOT use bpy.ops.object.select_all + bpy.ops.object.delete
+            # here. Those raw operators schedule a deferred wm_event_do_refresh_wm_and_depsgraph
+            # that races with the next mesh creation and causes EXCEPTION_ACCESS_VIOLATION
+            # in mesh_wrapper_ensure_subdivision (NULL customdata write).
+            # Instead, use safe bpy.data removal — same approach as clear_scene().
+            # Scene clearing is also the caller's responsibility via the clear_scene tool.
+            for obj in list(bpy.data.objects):
+                bpy.data.objects.remove(obj, do_unlink=True)
+            # Purge orphaned data blocks left behind
+            for mesh in list(bpy.data.meshes):
+                if mesh.users == 0:
+                    bpy.data.meshes.remove(mesh)
+            for mat in list(bpy.data.materials):
+                if mat.users == 0:
+                    bpy.data.materials.remove(mat)
+            # Flush depsgraph so no deferred work remains
+            bpy.context.view_layer.update()
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            depsgraph.update()
+            
             # Create MCP server app
             server_app = create_blender_mcp_server()
             
